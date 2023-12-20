@@ -12,14 +12,14 @@ from pyspark.sql.window import Window
 
 @dlt.create_table(
   comment="The cleaned accounts",
-  partition_cols=["AccountId"],
+  #partition_cols=["account_id"],
   table_properties={
     "WeTrust_deltaliv.quality": "silver",
     "pipelines.autoOptimize.managed": "true"
   }
 )
-@dlt.expect_or_drop("valid AccountId", "AccountId IS NOT NULL")
-@dlt.expect_or_drop("valid CustomerID", "CustomerID IS NOT NULL")
+@dlt.expect_or_drop("valid account_id", "account_id IS NOT NULL")
+@dlt.expect_or_drop("valid customer_id", "customer_id IS NOT NULL")
 def accounts_clean():
     """
     Cleans and prepares customer data.
@@ -30,26 +30,29 @@ def accounts_clean():
         DataFrame: A DataFrame containing cleaned customer data.
     """
     accounts_df = dlt.read('accounts_raw')
-    account_df = accounts_df.select([col(column).alias(column.lower()) for column in accounts_df.columns]).na.replace("?", None)
-    accounts_df = accounts_df.dropDuplicates(["AccountId"])
+    accounts_df = accounts_df.select([col(column).alias(column.lower()) for column in accounts_df.columns])
+    accounts_df = accounts_df.select([col(column).alias(column.lower()) for column in accounts_df.columns]).na.replace("?", None)
+    accounts_df = accounts_df.withColumnRenamed("customerid", "customer_id").withColumnRenamed("AccountId", "account_id")
+    accounts_df = accounts_df.dropDuplicates(["account_id"])
     accounts_df = accounts_df.fillna("missing data")
     accounts_df = accounts_df.withColumn("last_kyc_updated", date_format(col("last_kyc_updated"), "dd/MM/yyyy"))
     accounts_df = accounts_df.withColumn("account_created", date_format(col("account_created"), "dd/MM/yyyy"))
     accounts_df = accounts_df.withColumn("last_kyc_updated", to_date(col("last_kyc_updated"), "dd/MM/yyyy"))
     accounts_df = accounts_df.withColumn("account_created", to_date(col("account_created"), "dd/MM/yyyy"))
+    # accounts_df.write.format("delta").mode("append").option("mergeSchema", "true").partitionBy("account_id").saveAsTable("accounts_clean")
     return accounts_df
 
 # COMMAND ----------
 
 @dlt.create_table(
   comment="The cleaned branch, ingested from Bronze",
-  partition_cols=["branchid"],
+  partition_cols=["bank_city"],
   table_properties={
     "WeTrust_deltaliv.quality": "silver",
     "pipelines.autoOptimize.managed": "true"
   }
 )
-@dlt.expect_or_drop("valid branchid", "branchid IS NOT NULL")
+@dlt.expect_or_drop("valid branch_id", "branch_id IS NOT NULL")
 def branch_clean():
     """
     Clean and Normalize Branch DataFrame
@@ -65,13 +68,15 @@ def branch_clean():
     branches_df = dlt.read('branches_raw')
     branches_df = branches_df.select([col(column).alias(column.lower()) for column in branches_df.columns])
     branches_df=branches_df.fillna("missing data")
+    branches_df = branches_df.withColumnRenamed("branchid", "branch_id")
+    # branches_df.write.format("delta").mode("append").option("mergeSchema", "true").partitionBy("bank_city").saveAsTable("branches_clean")
     return branches_df
 
 # COMMAND ----------
 
 @dlt.create_table(
   comment="The cleaned customers, ingested from Bronze",
-  partition_cols=["customer_id"],
+  #partition_cols=["customer_id"],
   table_properties={
     "WeTrust_deltaliv.quality": "silver",
     "pipelines.autoOptimize.managed": "true"
@@ -98,6 +103,7 @@ def customers_clean():
     customers_df = customers_cleaned_df.fillna("missing data")
     customers_df = customers_df.withColumn("dob", date_format(col("dob"), "dd/MM/yyyy"))
     customers_df = customers_df.withColumn("dob", to_date(col("dob"), "dd/MM/yyyy"))
+    # customers_df.write.format("delta").mode("append").option("mergeSchema", "true").partitionBy("customer_id").saveAsTable("customers_clean")
     return customers_df
 
 # COMMAND ----------
@@ -129,6 +135,7 @@ def transactions_clean():
     transactions_df= transactions_df.fillna("missing data")
     transactions_df = transactions_df.withColumn("transaction_date", date_format(col("transaction_date"), "dd/MM/yyyy"))
     transactions_df = transactions_df.withColumn("transaction_date", to_date(col("transaction_date"), "dd/MM/yyyy"))
+    # transactions_df.write.format("delta").mode("append").option("mergeSchema", "true").partitionBy("transaction_id").saveAsTable("transactions_clean")
     return transactions_df
 
 # COMMAND ----------
@@ -164,9 +171,12 @@ def loans_clean():
     loans_df = dlt.read('loans_raw')
     loans_df = loans_df.select([col(column).alias(column.lower()) for column in loans_df.columns])
     test_df= loans_df.withColumn("Purpose",when(col("Current_Loan_Amount")=="99999999", "Buisness funding").otherwise(col("Purpose")))
-    loans_df= test_df.fillna("missing data")
+    loans_df = loans_df.withColumn('Purpose', when(loans_df['Purpose'] =='other','Other').otherwise(loans_df['Purpose']))
+    loans_df = loans_df.fillna({'Purpose':'Other'})
+    loans_df= test_df.fillna(0)
     loans_df = loans_df.withColumn("loan_sanctioned_date", date_format(col("loan_sanctioned_date"), "dd/MM/yyyy"))
     loans_df = loans_df.withColumn("loan_sanctioned_date", to_date(col("loan_sanctioned_date"), "dd/MM/yyyy"))
+    # loans_df.write.format("delta").mode("append").option("mergeSchema", "true").partitionBy("loan_id").saveAsTable("loans_clean")
     return loans_df
 
 # COMMAND ----------
@@ -194,14 +204,15 @@ def credit_clean():
     """
     credits_df = dlt.read('credits_raw')
     credits_df = credits_df.select([col(column).alias(column.lower()) for column in credits_df.columns])
-    credits_df= credits_df.fillna("missing data")
+    credits_df= credits_df.fillna("0")
+    credits_df = credits_df.withColumn(
+    "credit_score",
+    when((credits_df["credit_score"] > 850), credits_df["credit_score"] / 10)
+    .when((credits_df["credit_score"] == 0), 300)
+    .otherwise(credits_df["credit_score"])
+)
+    # credits_df.write.format("delta").mode("append").option("mergeSchema", "true").partitionBy("customer_id").saveAsTable("credits_clean")
     return credits_df
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC non_unique_ids = credits_clean.groupBy("customer_id").count().filter("count > 1")
-# MAGIC display(non_unique_ids)
 
 # COMMAND ----------
 
